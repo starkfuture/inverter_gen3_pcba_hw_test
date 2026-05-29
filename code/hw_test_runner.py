@@ -159,6 +159,12 @@ def run_single_test(bus:        HwTestCANBus,
         "analog_checks":   {},
         "analog_result":   "N/A",
         "analog_flags":    {},      # ch_id -> raw flags int (bit0 = FW OUT_OF_RANGE)
+        "analog_peak":     {},      # ch_id -> value at max |value| seen during
+                                    #   the test. Used for pulsed signals (e.g.
+                                    #   PUMP_AUTO toggles the pump switch at
+                                    #   ~0.5–1 Hz, so the current is only present
+                                    #   during the ON phase; the latest frame is
+                                    #   usually 0).
         "message":         "",
         "duration_s":      0.0,
         "early_exit":      False,
@@ -208,6 +214,11 @@ def run_single_test(bus:        HwTestCANBus,
     elapsed_ms         = 0
     test_status_key    = protocol.SF_HW_TEST_PROTOCOL_OBJECT_TYPE_TEST + "0"
 
+    # PUMP_AUTO pulses the pump switch ON/OFF at ~0.5–1 Hz; an early exit would
+    # stop before the ON phase delivers current. Disable early-exit for it so
+    # the full timeout window is sampled (peak capture below relies on this).
+    _early_exit = EARLY_EXIT_ON_PASS and test_key != "HW_TEST_PUMP_AUTO"
+
     def _firmware_already_passed():
         # Strict pass criterion: require the last N=PASS_REQUIRED_OK_FRAMES
         # status frames to all carry V+ or S+. Won't trigger early-exit
@@ -254,6 +265,16 @@ def run_single_test(bus:        HwTestCANBus,
                                 result["flags_history"].append(f)
                             except (KeyError, IndexError, TypeError):
                                 pass
+                    # Track per-channel peak (value at max |value|) for pulsed
+                    # signals like the PUMP_AUTO switch current.
+                    for _k, v in obj.items():
+                        if (v.get(protocol.SF_HW_TEST_PROTOCOL_OBJECT_TYPE_KEY) ==
+                                protocol.SF_HW_TEST_PROTOCOL_OBJECT_TYPE_ANALOG):
+                            _ch = v[protocol.SF_HW_TEST_PROTOCOL_OBJECT_FIELD_ANALOG_ID_KEY]
+                            _val = float(v[protocol.SF_HW_TEST_PROTOCOL_OBJECT_FIELD_ANALOG_VALUE_KEY])
+                            _prev = result["analog_peak"].get(_ch)
+                            if _prev is None or abs(_val) > abs(_prev):
+                                result["analog_peak"][_ch] = _val
                     # Accumulate in m_reported_objects (latest value wins)
                     m_reported_objects.update(obj)
 
@@ -261,7 +282,7 @@ def run_single_test(bus:        HwTestCANBus,
         elapsed_ms   += _APP_HW_TEST_SEQ_QUANTUM_TIME_IN_MS
 
         # ── Early-exit on firmware PASS ───────────────────────────────────
-        if (EARLY_EXIT_ON_PASS
+        if (_early_exit
                 and not grace_active
                 and elapsed_ms >= EARLY_EXIT_MIN_MS
                 and _firmware_already_passed()):
@@ -314,6 +335,16 @@ def run_single_test(bus:        HwTestCANBus,
 
     # ── Secondary: analog limit checks ───────────────────────────────────
     _extract_analog_values(protocol, m_reported_objects, result)
+
+    # PUMP_AUTO: the pump-HS currents (ANLG[31]/[33]) are only present during
+    # the switch ON phase, so the last-frame value is ~0. Report the PEAK seen
+    # during the test instead. The pump coil current is the sum of both
+    # high-side switches (HS1 + HS2).
+    if test_key == "HW_TEST_PUMP_AUTO":
+        for _ch in (31, 33):
+            if _ch in result["analog_peak"]:
+                result["analog_values"][_ch] = result["analog_peak"][_ch]
+
     _check_analog_limits(result)
 
     # ── ECHO secondary check ──────────────────────────────────────────────

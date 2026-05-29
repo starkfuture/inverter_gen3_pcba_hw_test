@@ -420,7 +420,7 @@ class HwTestProtocol:
             ("HW_TEST_MCU_INTER_MEASUREMENTS",        "",         0x00,     500),    # 0x04
             ("HW_TEST_ENC_SINCOS_SIN_LOOPBACK",       "",         0x00,     1500),   # 0x25  sin front-end
             ("HW_TEST_ENC_SINCOS_COS_LOOPBACK",       "",         0x00,     1500),   # 0x26  cos front-end
-            ("HW_TEST_PUMP_AUTO",                     "",         0x00,     5000),   # 0x2F
+            ("HW_TEST_PUMP_AUTO",                     "",         0x00,     8000),   # 0x2F (long: pump switch cycles ~0.5–1 Hz; need a full ON phase)
         ]
 
         merged = base + b_additions

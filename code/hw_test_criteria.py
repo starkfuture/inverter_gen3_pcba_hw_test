@@ -112,9 +112,10 @@ TEST_RELEVANT_CHANNELS: dict[str, set] = {
         22, 23, 24, 25, 26,
     },
 
-    # 0x2F — pump auto test: actively measures only the pump-related channels.
+    # 0x2F — pump auto test: pump HS-switch currents (peak, ON phase) + temps
+    # + tach. The pump coil current is the sum of HS1 (31) + HS2 (33).
     "HW_TEST_PUMP_AUTO": {
-        32, 34, 39,
+        31, 32, 33, 34, 39,
     },
 }
 
