@@ -1,0 +1,32 @@
+# Bench outputs — keep results/ folder but ignore its contents (except .gitkeep)
+results/*
+!results/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.venv/
+venv/
+.env
+
+# pm_step_session / pm_compare working state
+.pm_session_*.pkl
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Word lock files
+~$*.docx
+~$*.xlsx
+
+# Local scratch
+/tmp/
+*.log

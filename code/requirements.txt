@@ -1,0 +1,16 @@
+# Stage 1 HW PCBA automated test — Python dependencies
+# Install with:  pip install -r requirements.txt
+#
+# CAN interface — two options (only one is needed):
+#
+#   Option A (preferred): PCANBasic.dll via the PEAK driver installer.
+#     PCANBasic.py is installed by the PEAK PCAN-Basic API package.
+#     Download: https://www.peak-system.com/Downloads.76.0.html
+#     The pcan_interface.py module will use PCANBasic.py automatically
+#     if it is on the Python path.
+#
+#   Option B (fallback): python-can with the PCAN backend.
+#     Used when PCANBasic.py is not available.
+#
+python-can>=4.0.0      # CAN bus fallback (PCAN-USB via python-can)
+openpyxl>=3.1.0        # Excel (.xlsx) validation report
