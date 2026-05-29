@@ -114,6 +114,8 @@ def _build_summary_sheet(ws, results, session_meta, overall, counts):
     _section_title(ws, 1, "Inverter Gen3 — Stage 1 HW PCBA Validation Report", 6)
 
     info_rows = [
+        ("Part number",    session_meta.get("part_number",  "—")),
+        ("Report version", f"V{session_meta.get('report_version', 1)}"),
         ("Unit S/N",       session_meta.get("unit_sn",      "—")),
         ("Operator",       session_meta.get("operator",     "—")),
         ("Test sequence",  session_meta.get("sequence",     "—")),
@@ -436,14 +438,14 @@ def _build_power_module_sheet(wb, pm_records):
     F_STAT_V = Font(name=FONT, size=10, bold=True, color=NAVY)
 
     cols = ["Switch", "Freq cmd", "Duty cmd", "DB (ns)", "Frequency", "Duty",
-            "Rise", "Fall", "V-high", "V-low", "V-pp", "Verdict"]
-    widths = [9, 10, 10, 8, 13, 10, 10, 10, 10, 10, 10, 10]
+            "Rise", "Fall", "V-high", "V-low", "V-pp", "V-pp avg", "Verdict"]
+    widths = [9, 10, 10, 8, 13, 10, 10, 10, 10, 10, 10, 10, 10]
     _header_row(ws, 3, cols, widths)
 
     keys = ["frequency", "duty", "rise_time", "fall_time",
-            "v_high", "v_low", "v_pp"]
+            "v_high", "v_low", "v_pp", "v_pp_avg"]
     MEAS_FIRST_COL = 5
-    VERDICT_COL    = 12
+    VERDICT_COL    = MEAS_FIRST_COL + len(keys)
     row = 3
     for rec in pm_records:
         row += 1
@@ -460,7 +462,7 @@ def _build_power_module_sheet(wb, pm_records):
             c = ws.cell(row=row, column=ci, value=v)
             c.border = BORDER
             c.alignment = CENTER if ci != 1 else LEFT
-            if MEAS_FIRST_COL <= ci <= MEAS_FIRST_COL + 6:
+            if MEAS_FIRST_COL <= ci <= MEAS_FIRST_COL + len(keys) - 1:
                 meas_key = keys[ci - MEAS_FIRST_COL]
                 pok = rec.get("checks", {}).get(meas_key, (True, ""))[0]
                 c.fill = _fill(PASS_F if pok else FAIL_F)
@@ -507,13 +509,203 @@ def _build_power_module_sheet(wb, pm_records):
             cell.alignment = CENTER; cell.font = F_STAT_V
 
 
+# ── HV characterization (Phase 3, EA-supply driven) sheets ─────────────────
+
+# Standardised display: 2 decimals, matching the power-module sheet.
+_HV_DEC = 2
+
+
+def _linfit(xs, ys):
+    """Least-squares line y = gain·x + offset over paired (x, y), NaN-skipped.
+    Returns (gain, offset); NaN if fewer than 2 distinct points."""
+    pairs = [(x, y) for x, y in zip(xs, ys)
+             if x == x and y is not None and y == y]
+    n = len(pairs)
+    if n < 2:
+        return float("nan"), float("nan")
+    sx = sum(x for x, _ in pairs); sy = sum(y for _, y in pairs)
+    sxx = sum(x * x for x, _ in pairs); sxy = sum(x * y for x, y in pairs)
+    d = n * sxx - sx * sx
+    if d == 0:
+        return float("nan"), float("nan")
+    gain = (n * sxy - sx * sy) / d
+    offset = (sy - gain * sx) / n
+    return gain, offset
+
+
+def _rest_value(xs, ys):
+    """Mean of y where x == 0 (the resting / zero-input reading)."""
+    zs = [y for x, y in zip(xs, ys)
+          if x == 0 and y is not None and y == y]
+    return (sum(zs) / len(zs)) if zs else float("nan")
+
+
+def _calibration_block(ws, start_row, title, unit, groups):
+    """Write a 'Variable | Rest | Gain | Offset' calibration block.
+    `groups` = list of (label, xs, ys). Returns the next free row."""
+    F_HDR = Font(name="Arial", size=10, bold=True, color=WHITE)
+    F_L   = Font(name="Arial", size=10, bold=True)
+    F_V   = Font(name="Arial", size=10, bold=True, color=NAVY_TXT)
+    r = start_row + 1
+    tc = ws.cell(row=r, column=1, value=title)
+    tc.font = Font(name="Arial", size=11, bold=True, color=NAVY_TXT)
+    r += 1
+    for ci, lbl in enumerate(["Variable", f"Rest @0 ({unit})",
+                              "Gain", f"Offset ({unit})"], 1):
+        c = ws.cell(row=r, column=ci, value=lbl)
+        c.font = F_HDR; c.fill = _fill(HDR_F); c.alignment = CENTER; c.border = BORDER
+    r += 1
+    for label, xs, ys in groups:
+        gain, offset = _linfit(xs, ys)
+        rest = _rest_value(xs, ys)
+        vals = [label,
+                "—" if rest != rest else f"{rest:.{_HV_DEC}f}",
+                "—" if gain != gain else f"{gain:.4f}",
+                "—" if offset != offset else f"{offset:+.{_HV_DEC}f}"]
+        for ci, v in enumerate(vals, 1):
+            c = ws.cell(row=r, column=ci, value=v)
+            c.border = BORDER; c.alignment = LEFT if ci == 1 else CENTER
+            c.fill = _fill(SUB_F)
+            c.font = F_L if ci == 1 else F_V
+        r += 1
+    return r
+
+
+def _build_hv_voltage_sheet(wb, v_records):
+    """Add an 'HV Voltage' sheet from the EA-supply voltage sweep records
+    (one row per setpoint × placement). Each record:
+        {point, channel, channel_name, set_v, reads[], mean, std, std_rel,
+         err_abs, err_pct, lo, hi, tol_str, verdict}."""
+    ws = wb.create_sheet("HV Voltage")
+    _section_title(ws, 1,
+                   "F. HV voltage characterization "
+                   "(EA supply → PCB sense input, read over CAN)", 10)
+
+    cols = ["Placement", "Channel", "Set (V)", "N", "Mean (V)", "Std (abs)",
+            "Std (rel)", "Error", "Tolerance", "Verdict"]
+    widths = [11, 16, 9, 5, 10, 10, 10, 12, 18, 9]
+    _header_row(ws, 3, cols, widths)
+
+    F_DATA = Font(name="Arial", size=10)
+    F_BOLD = Font(name="Arial", size=10, bold=True)
+    row = 3
+    for rec in v_records:
+        row += 1
+        ok = rec.get("verdict", False)
+        rfill = _fill(PASS_F if ok else FAIL_F)
+        mean, std, rel = rec.get("mean"), rec.get("std"), rec.get("std_rel")
+        err = rec.get("err_abs")
+        vals = [
+            rec.get("point", ""),
+            f"ANLG[{rec.get('channel','?')}] {rec.get('channel_name','')}",
+            f"{rec.get('set_v', float('nan')):.{_HV_DEC}f}",
+            len(rec.get("reads", [])),
+            "—" if mean != mean else f"{mean:.{_HV_DEC}f}",
+            "—" if std != std else f"{std:.{_HV_DEC}f}",
+            "—" if rel != rel else f"{rel:.{_HV_DEC}f} %",
+            "—" if err != err else f"{err:+.{_HV_DEC}f} V",
+            rec.get("tol_str", ""),
+            "PASS" if ok else "FAIL",
+        ]
+        for ci, v in enumerate(vals, 1):
+            c = ws.cell(row=row, column=ci, value=v)
+            c.border = BORDER
+            c.alignment = LEFT if ci in (1, 2, 9) else CENTER
+            c.fill = rfill
+            if ci == len(vals):
+                c.font = Font(name="Arial", size=10, bold=True,
+                              color=PASS_TXT if ok else FAIL_TXT)
+            else:
+                c.font = F_BOLD if ci == 1 else F_DATA
+        ws.row_dimensions[row].height = 20
+    ws.freeze_panes = "A4"
+
+    # ── per-placement calibration (rest @0 V, gain, offset) ────────────────
+    points, seen = [], set()
+    for rec in v_records:
+        p = rec.get("point", "")
+        if p not in seen:
+            seen.add(p); points.append(p)
+    groups = []
+    for p in points:
+        rows = [r for r in v_records if r.get("point") == p]
+        xs = [r.get("set_v", float("nan")) for r in rows]
+        ys = [r.get("mean", float("nan")) for r in rows]
+        groups.append((f"{p}  (ANLG[{rows[0].get('channel','?')}])", xs, ys))
+    _calibration_block(ws, row + 1, "Calibration per placement "
+                       "(fit: reading = gain·V_applied + offset)", "V", groups)
+
+
+def _build_hv_current_sheet(wb, i_records):
+    """Add an 'Phase Current' sheet from the EA CC-mode current sweep records
+    (one row per signed setpoint). Each record:
+        {orientation, set_a, compliance_v, phases{ch:{mean,std,std_rel,ok}},
+         tol_str, verdict}."""
+    ws = wb.create_sheet("Phase Current")
+    _section_title(ws, 1,
+                   "G. Phase-current characterization "
+                   "(EA supply CC-mode → phase shunts, read over CAN)", 10)
+
+    cols = ["Set (A)", "I_U mean", "I_U std", "I_V mean", "I_V std",
+            "I_W mean", "I_W std", "Tolerance", "Verdict"]
+    widths = [9, 10, 9, 10, 9, 10, 9, 18, 9]
+    _header_row(ws, 3, cols, widths)
+
+    F_DATA = Font(name="Arial", size=10)
+    chs = [1, 2, 3]
+    row = 3
+    for rec in i_records:
+        row += 1
+        ok = rec.get("verdict", False)
+        rfill = _fill(PASS_F if ok else FAIL_F)
+        ph = rec.get("phases", {})
+        vals = [f"{rec.get('set_a', float('nan')):+.{_HV_DEC}f}"]
+        cell_ok = [True]   # per-cell pass flag for colouring (Set col always ok)
+        for ch in chs:
+            d = ph.get(ch, {})
+            mean, std = d.get("mean", float("nan")), d.get("std", float("nan"))
+            vals.append("—" if mean != mean else f"{mean:+.{_HV_DEC}f}")
+            vals.append("—" if std != std else f"{std:.{_HV_DEC}f}")
+            cell_ok.append(d.get("ok", True)); cell_ok.append(d.get("ok", True))
+        vals.append(rec.get("tol_str", ""))
+        vals.append("PASS" if ok else "FAIL")
+        cell_ok.append(True); cell_ok.append(True)
+        for ci, v in enumerate(vals, 1):
+            c = ws.cell(row=row, column=ci, value=v)
+            c.border = BORDER
+            c.alignment = LEFT if ci == 8 else CENTER
+            c.fill = _fill(PASS_F if cell_ok[ci - 1] else FAIL_F) \
+                if ci not in (1, 8, 9) else rfill
+            if ci == len(vals):
+                c.font = Font(name="Arial", size=10, bold=True,
+                              color=PASS_TXT if ok else FAIL_TXT)
+            else:
+                c.font = F_DATA
+        ws.row_dimensions[row].height = 20
+    ws.freeze_panes = "A4"
+
+    # ── per-phase calibration (rest @0 A, gain, offset) ────────────────────
+    # x = applied signed current (rec["set_a"]); y = that phase's measured mean.
+    from hw_test_criteria import channel_name as _cn
+    groups = []
+    for ch in chs:
+        xs = [r.get("set_a", float("nan")) for r in i_records]
+        ys = [r.get("phases", {}).get(ch, {}).get("mean", float("nan"))
+              for r in i_records]
+        groups.append((f"{_cn(ch)}  (ANLG[{ch}])", xs, ys))
+    _calibration_block(ws, row + 1, "Calibration per phase "
+                       "(fit: reading = gain·I_applied + offset)", "A", groups)
+
+
 # ── Public API ─────────────────────────────────────────────────────────────
 
 def generate_validation_report(results:      List[Dict[str, Any]],
                                 session_meta: Dict[str, Any],
                                 output_path:  str,
                                 scope_records: List[Dict[str, Any]] = None,
-                                pm_records:    List[Dict[str, Any]] = None) -> str:
+                                pm_records:    List[Dict[str, Any]] = None,
+                                hv_v_records:  List[Dict[str, Any]] = None,
+                                hv_i_records:  List[Dict[str, Any]] = None) -> str:
     """
     Generate an Excel (.xlsx) Validation Report — one workbook for the whole
     PCBA verification.
@@ -540,6 +732,16 @@ def generate_validation_report(results:      List[Dict[str, Any]],
     n_fail    = sum(1 for r in results if r["result"] == "FAIL")
     n_timeout = sum(1 for r in results if r["result"] == "TIMEOUT")
     n_error   = sum(1 for r in results if r["result"] == "ERROR")
+
+    # Fold the EA-driven HV characterization (Phase 3) verdicts into the
+    # executive counts so the overall verdict reflects them too.
+    for hv in (hv_v_records or []) + (hv_i_records or []):
+        n_total += 1
+        if hv.get("verdict"):
+            n_pass += 1
+        else:
+            n_fail += 1
+
     overall   = "PASS" if (n_fail == 0 and n_timeout == 0 and n_error == 0) else "FAIL"
     counts    = (n_total, n_pass, n_fail, n_timeout, n_error)
 
@@ -551,6 +753,10 @@ def generate_validation_report(results:      List[Dict[str, Any]],
         _build_gate_scope_sheet(wb, scope_records)
     if pm_records:
         _build_power_module_sheet(wb, pm_records)
+    if hv_v_records:
+        _build_hv_voltage_sheet(wb, hv_v_records)
+    if hv_i_records:
+        _build_hv_current_sheet(wb, hv_i_records)
     _build_conclusions_sheet(wb, results, session_meta, overall, counts)
 
     # — Footer text on every sheet

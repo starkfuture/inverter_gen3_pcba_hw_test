@@ -37,6 +37,8 @@ inverter_gen3_pcba_hw_test/
 ├── code/                          # All Python tools
 │   ├── verify_pcba.py             # PRIMARY ENTRY POINT — runs the 3-phase campaign
 │   ├── pm_step_session.py         # Step-by-step power-module sweep (chat-driven Phase 2)
+│   ├── hv_iv_session.py           # Phase 3 — EA-supply HV voltage + phase-current characterization (step/chat-driven)
+│   ├── ea_supply.py               # EA lab-supply SCPI driver (USB/serial/LAN; output off on exit)
 │   ├── run_power_module_sweep.py  # Standalone power-module sweep (own report)
 │   ├── pm_compare.py              # Compare two pm sessions for run-to-run consistency
 │   ├── pm_poke.py                 # CAN poke diagnostic (send freq/duty, watch FW vars)
@@ -69,9 +71,9 @@ inverter_gen3_pcba_hw_test/
         └── three-phase-model.md    # Detailed per-test list + protocol encoding cheat-sheet
 ```
 
-## The 3-phase campaign model
+## The 4-phase campaign model
 
-**`python verify_pcba.py --unit-sn <SN> --all`** runs all three phases and writes one unified `results/ValidationReport_<SN>_<ts>.xlsx`.
+**`python verify_pcba.py --unit-sn <SN> --all`** runs all four phases and writes one unified `results/ValidationReport_<SN>_<ts>.xlsx`.
 
 ### Phase 1 — Self auto-verification (16 tests, unattended)
 
@@ -87,7 +89,25 @@ For each of the 6 switches (UTOP, UBOT, VTOP, VBOT, WTOP, WBOT) the operator mov
 
 CLI: `--power-module`.
 
-### Phase 3 — Operator-verified (5 tests, prompted)
+### Phase 3 — HV voltage + phase current (EA-supply driven, prompted)
+
+EA laboratory-supply characterization that **replaces the old DAC unipolar/bipolar voltage loopbacks** (`0x2A`/`0x2B`, now removed from the campaign sequence). Driven by `code/hv_iv_session.py` (engine + chat-driven step CLI) and integrated into `verify_pcba.py` as `run_hv_phase()`. Uses `code/ea_supply.py` (SCPI over USB/serial/LAN; output is always forced to 0 and disabled after every sweep and on abort).
+
+**Voltage** — for each placement the operator moves the supply terminals, then the tool sweeps **0→400 V in 50 V steps**, reads the matching CAN channel back `--hv-repeats` times per step (dispersion = mean/std), and compares to the supply setpoint with a modifiable tolerance (`--hv-tol-pct` / `--hv-v-tol-abs`).
+
+Placements are prompted in this default order (`VOLTAGE_POINT_ORDER`): **UV → WV → DC_LINK**.
+
+| Placement | CAN channel | Meaning |
+|---|---|---|
+| UV | `ANLG[5]` UV_VOLTAGE | "phase U" voltage sense |
+| WV | `ANLG[6]` WV_VOLTAGE | "phase V" voltage sense |
+| DC_LINK | `ANLG[4]` DC_LINK | DC-link voltage sense |
+
+**Current** — EA in **CC mode** (current setpoint = target, low voltage compliance `--hv-compliance-v`) through the phase shunts, sweeping the magnitude **0→20 A in 5 A steps**, reading all three phase channels at once (`ANLG[1/2/3]` I_Ph_U/V/W). The operator **flips the terminals** to cover the negative orientation, giving a −20…0…+20 A table.
+
+CLI: `--hv` (plus `--ea-resource`, `--hv-v-max`, `--hv-i-max`, `--hv-compliance-v`, `--hv-repeats`, tolerances). Report sheets: **HV Voltage** + **Phase Current**.
+
+### Phase 4 — Operator-verified (3 tests, prompted)
 
 Sequence `B<x>_LOOPBACK` (legacy name; the set is "operator-verified"). Each test prints its instruction from `MANUAL_SETUP_INSTRUCTIONS` (in `code/hw_test_criteria.py`) and waits for ENTER. **Always interactive** — `--no-prompts` does not suppress these.
 
@@ -96,14 +116,13 @@ Sequence `B<x>_LOOPBACK` (legacy name; the set is "operator-verified"). Each tes
 | 0x01 | `HW_TEST_LEDS` | Visually verify LED1 and LED2 blink during the test |
 | 0x25 | `HW_TEST_ENC_SINCOS_SIN_LOOPBACK` | DAC1→SIN+, DAC2→SIN− |
 | 0x26 | `HW_TEST_ENC_SINCOS_COS_LOOPBACK` | DAC1→COS+, DAC2→COS− |
-| 0x2A | `HW_TEST_POWER_UNIPLR_V_LOOPBACK` | DAC1→DC-link voltage-sense isolated input |
-| 0x2B | `HW_TEST_POWER_BIPLR_V_LOOPBACK` | DAC1→UV/WV + leg, DAC2→− leg |
 
 CLI: `--loopback`.
 
 ### Other flags worth knowing
-- `--all` — Phase 1 + Phase 2 + Phase 3
-- `--no-prompts` — skips DAC-test prompts in Phase 1 invocations (they then FAIL because hookup isn't done); does NOT suppress Phase 3 prompts
+- `--all` — Phase 1 + Phase 2 + Phase 3 + Phase 4
+- `--hv`, `--ea-resource`, `--hv-v-max`, `--hv-i-max`, `--hv-compliance-v`, `--hv-repeats`, `--hv-tol-pct` — Phase 3 (HV) controls
+- `--no-prompts` — skips DAC-test prompts in Phase 1 invocations (they then FAIL because hookup isn't done); does NOT suppress Phase 3 (terminal-move) or Phase 4 prompts
 - `--unit-sn <SN>` — board serial → filename
 - `--hw-version <n>` — 3 = B1 (2 external NTCs populated, channels 37/38 skipped). Auto-detected from ANLG[0] if omitted.
 - `--resource "USB0::0x0AAD::0x01D6::<serial>::INSTR"` — explicit scope VISA resource
@@ -135,7 +154,17 @@ If you're orchestrating from an environment whose Bash tool **cannot feed keystr
    python pm_step_session.py report --session <name>
    ```
    Use the model's question-asking ability to confirm each probe move before running the next switch. Each invocation does its own `_start_pm_test` (which is `SET_TEST(NO_TEST)→SET_TEST(ALL_POWER_MODULE)+SET_PWM_DT`), giving the per-switch driver reset Phase 2 needs.
-3. **Phase 3**: drive one test at a time the same way (run a single-test sequence with operator confirming the hookup via chat first).
+3. **Phase 3 (HV)**: drive placement-by-placement with `hv_iv_session.py` (one CAN-bus + EA open per call, output forced off on exit), confirming each terminal move / polarity flip via chat:
+   ```
+   python hv_iv_session.py voltage --point DC_LINK --session <name> --ea-resource <visa>
+   python hv_iv_session.py voltage --point UV --session <name> --ea-resource <visa>
+   python hv_iv_session.py voltage --point WV --session <name> --ea-resource <visa>
+   python hv_iv_session.py current --orientation pos --session <name> --ea-resource <visa>
+   # flip terminals, then:
+   python hv_iv_session.py current --orientation neg --session <name> --ea-resource <visa>
+   python hv_iv_session.py report  --session <name>
+   ```
+4. **Phase 4**: drive one operator-verified test at a time the same way (run a single-test sequence with the operator confirming the hookup via chat first).
 
 ## Critical gotchas (read `references/bench-lessons.md` for full story)
 
@@ -151,7 +180,7 @@ These are non-obvious. **Always check this list when something behaves unexpecte
 
 ## Reports
 
-- **`results/ValidationReport_<SN>_<ts>.xlsx`** — single unified workbook from `verify_pcba.py`. Sheets: `Summary`, `Test Results`, `Analog Readings`, `Power Module Sweep` (if Phase 2 ran), `Conclusions`.
+- **`results/ValidationReport_<SN>_<ts>.xlsx`** — single unified workbook from `verify_pcba.py`. Sheets: `Summary`, `Test Results`, `Analog Readings`, `Power Module Sweep` (if Phase 2 ran), `HV Voltage` + `Phase Current` (if Phase 3 ran), `Conclusions`. The Phase-3 HV verdicts are folded into the executive PASS/FAIL counts and overall verdict. `hv_iv_session.py report` writes the same workbook from a saved session.
 - **`results/PowerModuleSweep_<SN>_<ts>.xlsx`** — Phase 2 standalone (from `pm_step_session.py report` or `run_power_module_sweep.py`). One row per setpoint, ends with **Mean / Std(abs) / Std(rel)** summary rows over rise / fall / V-high / V-low / V-pp (frequency and duty are excluded because they're swept by design).
 - **`results/PowerModuleSweep_Compare_<SW>_<ts>.xlsx`** — `pm_compare.py` output for two-session run-to-run diff (catch intermittent "stuck variable" firmware behaviour).
 

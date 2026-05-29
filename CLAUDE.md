@@ -9,7 +9,7 @@ The canonical reference is **`plan/InvGen3_HW_PCBA_TestByTest_Plan.pdf`**
 (v3.2+) and the operating manual is the skill at
 **`.claude/skills/inverter-gen3-pcba-hw-test/SKILL.md`** — that skill loads
 automatically when the user mentions anything Inverter-Gen3-related and
-covers hardware setup, the 3-phase campaign, commands, and the bench gotchas.
+covers hardware setup, the 4-phase campaign, commands, and the bench gotchas.
 **Read the skill first when in doubt.**
 
 ## Primary entry point
@@ -19,8 +19,12 @@ python code/verify_pcba.py --unit-sn <SN> --all
 ```
 Runs Phase 1 (16 self auto-verification tests, unattended), Phase 2
 (`HW_TEST_ALL_POWER_MODULE` 0x1B scope sweep — 6 switches × 9 setpoints, with
-a `NO_TEST → ALL_POWER_MODULE` driver reset after each probe move), and
-Phase 3 (5 operator-verified tests: LEDs + 4 DAC-injection loopbacks).
+a `NO_TEST → ALL_POWER_MODULE` driver reset after each probe move), Phase 3
+(EA-supply HV characterization — voltage 0→400 V/50 V on DC_LINK/UV/WV sense
+inputs + phase current ±20 A/5 A CC-mode on the shunts, read over CAN; needs
+`--ea-resource`), and Phase 4 (3 operator-verified tests: LEDs + encoder
+sin/cos loopbacks). Phase 3 replaced the old DAC unipolar/bipolar loopbacks
+(`0x2A`/`0x2B`); the chat/step-driven equivalent is `code/hv_iv_session.py`.
 
 ## Top gotchas (full story in `.claude/skills/.../references/bench-lessons.md`)
 

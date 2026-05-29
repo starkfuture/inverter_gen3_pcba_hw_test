@@ -7,10 +7,10 @@ that contains every result — both the firmware-automated test campaign and
 the manual scope-assisted gate checks. Some steps are automatic; others ask
 you to move a probe. It is all one PCBA verification → one workbook.
 
-Phases (3-phase B-sample campaign)
+Phases (4-phase B-sample campaign)
 ──────────────────────────────────
   Phase 1 — Self auto-verification (default ON; --no-self to skip)
-            ~17 firmware tests over CAN, no operator input required (assumes
+            ~16 firmware tests over CAN, no operator input required (assumes
             UART / GPIO loopback jumpers are on the fixture). Sequence
             "B<x>_SELF" in the protocol. Runs unattended.
 
@@ -21,24 +21,33 @@ Phases (3-phase B-sample campaign)
             test is cycled (NO_TEST → ALL_POWER_MODULE) to clear the driver
             "not ready" condition caused by the probe change.
 
-  Phase 3 — Operator-verified tests (--loopback)
-            5 tests: HW_TEST_LEDS (0x01, LED visual check) +
-            ENC_SINCOS_SIN/COS (0x25/0x26), POWER_UNIPLR_V (0x2A),
-            POWER_BIPLR_V (0x2B) — operator wires a DAC output to an
-            analog input before each DAC test; for LEDS the operator
-            visually confirms LED1/LED2 blink. Always interactive
-            (--no-prompts does not suppress these hookups). Sequence
-            "B<x>_LOOPBACK" in the protocol (aliased; see hw_protocol.py).
+  Phase 3 — HV voltage + phase current (--hv)
+            EA laboratory-supply driven characterization (replaces the old
+            DAC unipolar/bipolar loopbacks). Voltage: sweep 0→400 V in 50 V
+            steps on each sense input (DC_LINK / UV / WV), reading the PCB's
+            CAN value back and comparing to the supply setpoint (modifiable
+            limits) with N repeats for dispersion. Current: CC-mode sweep
+            ±20 A in 5 A steps through the phase shunts, reading all 3 phase
+            channels at once; operator flips the terminals to reverse polarity.
+            Interactive (terminal-move / flip prompts). See hv_iv_session.py
+            for the chat-driven / step-by-step equivalent.
 
-  --all      Shorthand: Phase 1 + Phase 2 + Phase 3.
+  Phase 4 — Operator-verified tests (--loopback)
+            3 tests: HW_TEST_LEDS (0x01, LED visual check) +
+            ENC_SINCOS_SIN/COS (0x25/0x26) — operator wires a DAC output to an
+            analog input before each DAC test; for LEDS the operator visually
+            confirms LED1/LED2 blink. Always interactive (--no-prompts does not
+            suppress these hookups). Sequence "B<x>_LOOPBACK" in the protocol.
+
+  --all      Shorthand: Phase 1 + Phase 2 + Phase 3 + Phase 4.
   --scope    Optional legacy gate-scope check (0x18/0x19), separate from
-             the 3 main phases.
+             the 4 main phases.
 
 Output
 ──────
   results/ValidationReport_<SN>_<timestamp>.xlsx   ← single file, sheets:
       Summary | Test Results | Analog Readings |
-      [Gate Scope Checks] | Conclusions
+      [Power Module Sweep] | [HV Voltage] | [Phase Current] | Conclusions
 
 Usage
 ─────
@@ -255,6 +264,117 @@ def run_power_module_phase(args):
     return records
 
 
+# ── Phase 3 helper (HV voltage + phase current, EA-supply driven) ──────────
+
+def run_hv_phase(args):
+    """Run the EA-supply HV characterization (replaces the old DAC-injection
+    unipolar/bipolar loopbacks). Two operator-paced steps:
+
+      • voltage : for each placement (DC_LINK, UV, WV) prompt the operator to
+                  move the supply terminals, then sweep 0→v_max in v_step and
+                  read the matching CAN channel back (repeats× for dispersion).
+      • current : drive the EA in CC mode through the phase shunts, sweep the
+                  magnitude 0→i_max; prompt to FLIP the terminals between the
+                  positive and negative orientations.
+
+    Returns (voltage_records, current_records). The supply is forced to 0 and
+    disabled after every sweep (and on abort) by the engine."""
+    import hv_iv_session as hv
+    from ea_supply import make_supply
+    from hw_protocol import HwTestProtocol
+
+    simulate = args.simulate
+    protocol = HwTestProtocol()
+
+    v_points = hv._gen_points(args.hv_v_min, args.hv_v_max, args.hv_v_step)
+    i_mags   = hv._gen_points(0.0, args.hv_i_max, args.hv_i_step)
+
+    if simulate:
+        ea = make_supply(None).open()
+        bus = None
+    else:
+        ea = make_supply(args.ea_resource,
+                         voltage_limit=args.hv_v_max + 20.0,
+                         current_limit=args.hv_i_max + 2.0,
+                         backend=args.ea_backend).open()
+        bus = hv._open_can()
+        hv._enable_report(bus, protocol)
+
+    print("\n" + "=" * 72)
+    print("  PHASE 3 — HV voltage + phase-current characterization (EA supply)")
+    print(f"  Supply    : {'(simulated)' if simulate else args.ea_resource}")
+    print(f"  Voltage   : {args.hv_v_min:g}→{args.hv_v_max:g} V step {args.hv_v_step:g}"
+          f"  ({len(v_points)} steps)  ±{args.hv_tol_pct:g}%/±{args.hv_v_tol_abs:g} V  "
+          f"(I-limit {hv.VOLTAGE_TEST_CURRENT_LIMIT_A*1000:.0f} mA)")
+    print(f"  Current   : ±{args.hv_i_max:g} A step {args.hv_i_step:g}"
+          f"  (CC, compliance {args.hv_compliance_v:g} V)  "
+          f"±{args.hv_tol_pct:g}%/±{args.hv_i_tol_abs:g} A")
+    print(f"  Repeats   : {args.hv_repeats} reads/step")
+    print("=" * 72)
+
+    v_records, i_records = [], []
+    try:
+        # ── voltage placements ──────────────────────────────────────────
+        for point in hv.VOLTAGE_POINT_ORDER:
+            ch = hv.VOLTAGE_POINTS[point]
+            print("\n  " + "═" * 68)
+            print(f"  ⚠  Connect the supply VOLTAGE cables to the  {point}  "
+                  f"sense input (ANLG[{ch}]).  Supply I-limit "
+                  f"{hv.VOLTAGE_TEST_CURRENT_LIMIT_A*1000:.0f} mA.")
+            print("  " + "═" * 68)
+            # HV connection prompt is MANDATORY (not suppressed by --no-prompts):
+            # the operator must physically confirm the cable placement before
+            # any voltage is applied. Only --simulate bypasses it.
+            if not simulate:
+                try:
+                    input(f"  Press ENTER when the cables are on {point} … ")
+                except (EOFError, KeyboardInterrupt):
+                    print("\n  HV voltage step aborted by operator."); break
+            recs = hv.measure_voltage_point(
+                point, ea, bus, protocol, set_points=v_points,
+                tol_pct=args.hv_tol_pct, tol_abs=args.hv_v_tol_abs,
+                repeats=args.hv_repeats, settle_s=args.hv_settle,
+                read_gap_s=args.hv_read_gap, simulate=simulate)
+            v_records.extend(recs)
+
+        # ── current orientations (flip terminals between the two) ─────────
+        for orientation in ("pos", "neg"):
+            print("\n  " + "═" * 68)
+            pass_label = ("PASS 1 (first sense)" if orientation == "pos"
+                          else "PASS 2 (flipped sense)")
+            if orientation == "pos":
+                print("  ⚠  Connect the supply CURRENT cables through the phase "
+                      "shunts (CC mode). Either sense is fine — the measured "
+                      "sign is recorded.")
+            else:
+                print("  ⚠  CHANGE THE SENSE: flip the supply current cables "
+                      "(reverse polarity) vs. the first pass.")
+            print("  " + "═" * 68)
+            # Current connection / sense-change prompt is MANDATORY too.
+            if not simulate:
+                try:
+                    input(f"  Press ENTER when wired for {pass_label} … ")
+                except (EOFError, KeyboardInterrupt):
+                    print("\n  HV current step aborted by operator."); break
+            recs = hv.measure_current_orientation(
+                orientation, ea, bus, protocol, set_mags=i_mags,
+                compliance_v=args.hv_compliance_v, tol_pct=args.hv_tol_pct,
+                tol_abs=args.hv_i_tol_abs, repeats=args.hv_repeats,
+                settle_s=args.hv_settle, read_gap_s=args.hv_read_gap,
+                simulate=simulate)
+            i_records.extend(recs)
+    finally:
+        ea.close()
+        if bus is not None:
+            bus.close()
+
+    # Order the current rows neg→pos so the table reads -20…0…+20 A.
+    neg = [r for r in i_records if r["orientation"] == "neg"]
+    pos = [r for r in i_records if r["orientation"] == "pos"]
+    i_records = list(reversed(neg)) + pos
+    return v_records, i_records
+
+
 # ── main ───────────────────────────────────────────────────────────────────
 
 def main():
@@ -264,6 +384,9 @@ def main():
     p.add_argument("--sequence", "-s", default=TEST_SEQUENCE,
                    choices=["A0_A1", "A0", "A1", "B0", "B1", "B2"])
     p.add_argument("--unit-sn", "-u", default=UNIT_SN)
+    p.add_argument("--part-number", "--pn", default=None,
+                   help="PCB part number, e.g. INVGEN3B1-01 (prompted at start "
+                        "if omitted). Report goes in results/<part-number>/.")
     p.add_argument("--operator", "-o", default=OPERATOR)
     p.add_argument("--hw-version", type=int, default=HW_VERSION_OVERRIDE)
     p.add_argument("--no-prompts", action="store_true",
@@ -331,29 +454,73 @@ def main():
                         "driver reset (NO_TEST → ALL_POWER_MODULE) after each "
                         "probe move. Kept for CLI back-compat; default 0.")
 
-    # ── 3-phase campaign control ────────────────────────────────────────────
+    # Phase 3 (HV voltage + phase-current characterization, EA-supply driven)
+    p.add_argument("--hv", action="store_true",
+                   help="Run Phase 3 (EA-supply HV voltage + phase-current "
+                        "characterization; replaces the old DAC unipolar/"
+                        "bipolar loopbacks). Interactive: prompts for terminal "
+                        "moves / polarity flip.")
+    p.add_argument("--ea-resource", default=None,
+                   help="EA supply VISA resource (e.g. ASRL6::INSTR, "
+                        "USB0::0x2184::..., TCPIP::ip::INSTR)")
+    p.add_argument("--ea-backend", default="",
+                   help="VISA backend for the EA ('' = system VISA, '@py')")
+    p.add_argument("--hv-v-min", type=float, default=0.0,
+                   help="HV voltage sweep min (V, default 0)")
+    p.add_argument("--hv-v-step", type=float, default=50.0,
+                   help="HV voltage sweep step (V, default 50)")
+    p.add_argument("--hv-v-max", type=float, default=400.0,
+                   help="HV voltage sweep max (V, default 400)")
+    p.add_argument("--hv-i-max", type=float, default=20.0,
+                   help="Phase-current sweep magnitude max (A, default 20)")
+    p.add_argument("--hv-i-step", type=float, default=5.0,
+                   help="Phase-current sweep step (A, default 5)")
+    p.add_argument("--hv-compliance-v", type=float, default=5.0,
+                   help="CC-mode voltage compliance ceiling (V, default 5)")
+    p.add_argument("--hv-tol-pct", type=float, default=5.0,
+                   help="HV tolerance as %% of setpoint (default 5)")
+    p.add_argument("--hv-v-tol-abs", type=float, default=5.0,
+                   help="HV voltage absolute tolerance floor (V, default 5)")
+    p.add_argument("--hv-i-tol-abs", type=float, default=1.0,
+                   help="HV current absolute tolerance floor (A, default 1)")
+    p.add_argument("--hv-repeats", type=int, default=5,
+                   help="Readings per step for dispersion (default 5)")
+    p.add_argument("--hv-settle", type=float, default=1.5,
+                   help="Seconds to settle after each setpoint (default 1.5)")
+    p.add_argument("--hv-read-gap", type=float, default=0.1,
+                   help="Seconds between repeat reads (default 0.1)")
+
+    # ── 4-phase campaign control ────────────────────────────────────────────
     # Phase 1 — Self auto-verification (default ON; --no-self to skip).
     # Phase 2 — Power modules scope sweep (--power-module to enable; above).
-    # Phase 3 — DAC-injection loopback tests (--loopback to enable; always
-    #           interactive even with --no-prompts because hookups are required).
-    # --all = enable all three phases (Phase 1 + Phase 2 + Phase 3).
+    # Phase 3 — HV voltage + phase-current characterization (--hv; above).
+    # Phase 4 — Operator-verified tests: LEDs + encoder sin/cos loopbacks
+    #           (--loopback; always interactive even with --no-prompts).
+    # --all = enable all four phases (Phase 1 + Phase 2 + Phase 3 + Phase 4).
     p.add_argument("--no-self", action="store_true",
                    help="Skip Phase 1 (self auto-verification tests)")
     p.add_argument("--loopback", action="store_true",
-                   help="Run Phase 3 (DAC-injection loopback tests, interactive)")
+                   help="Run Phase 4 (operator-verified: LEDs + encoder "
+                        "sin/cos loopbacks, interactive)")
     p.add_argument("--all", action="store_true",
-                   help="Shorthand: Phase 1 (self) + Phase 2 (power module) + Phase 3 (loopback)")
+                   help="Shorthand: Phase 1 (self) + Phase 2 (power module) + "
+                        "Phase 3 (HV) + Phase 4 (operator-verified)")
     args = p.parse_args()
     if args.all:
         args.power_module = True
+        args.hv = True
         args.loopback = True
         # --no-self can still suppress Phase 1 even with --all
+
+    # Resolve the PCB part number up front (prompt at the bench if omitted).
+    from hv_iv_session import resolve_part_number
+    part_number = resolve_part_number(args)
+    print(f"\n  PCB part number: {part_number}")
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
     sn_safe = args.unit_sn.replace("/", "-").replace(" ", "_")
     os.makedirs(_RESULTS_DIR, exist_ok=True)
     csv_path  = os.path.join(_RESULTS_DIR, f"test_results_{sn_safe}_{ts}.csv")
-    xlsx_path = os.path.join(_RESULTS_DIR, f"ValidationReport_{sn_safe}_{ts}.xlsx")
 
     # Derive the per-phase sequence names from the base sequence.
     # B-sample is split into <X>_SELF (Phase 1) and <X>_LOOPBACK (Phase 3);
@@ -410,17 +577,30 @@ def main():
                 f"dead-band {args.deadband_ns:g} ns")
         phase_labels.append(f"P2:PowerModule({len(pm_records) if pm_records else 0})")
 
-    # ── Phase 3: DAC-injection loopback tests (operator hookups) ─────────
+    # ── Phase 3: HV voltage + phase-current characterization (EA supply) ──
+    hv_v_records = None
+    hv_i_records = None
+    if args.hv:
+        hv_v_records, hv_i_records = run_hv_phase(args)
+        if session_meta is not None:
+            session_meta["hv_characterization"] = (
+                f"voltage {args.hv_v_min:g}-{args.hv_v_step:g}-{args.hv_v_max:g} V, "
+                f"current ±{args.hv_i_max:g} A step {args.hv_i_step:g} A "
+                f"(CC {args.hv_compliance_v:g} V), {args.hv_repeats} reads/step")
+        phase_labels.append(
+            f"P3:HV(V{len(hv_v_records)}+I{len(hv_i_records)})")
+
+    # ── Phase 4: Operator-verified tests (LEDs + encoder sin/cos loopbacks) ─
     if args.loopback:
         if seq_loop is None:
-            print(f"[Phase 3] Loopback split is only defined for B-sample "
-                  f"sequences; skipping (--sequence={args.sequence}).")
+            print(f"[Phase 4] Operator-verified split is only defined for "
+                  f"B-sample sequences; skipping (--sequence={args.sequence}).")
         else:
             print("=" * 72)
-            print("  PHASE 3 — Operator-verified tests (LED visual + DAC hookups)")
+            print("  PHASE 4 — Operator-verified tests (LED visual + encoder sin/cos)")
             print("=" * 72)
             csv_loop = csv_path[:-4] + "_loopback.csv"
-            meta_p3, results_p3 = execute_campaign(
+            meta_p4, results_p4 = execute_campaign(
                 sequence_name        = seq_loop,
                 unit_sn              = args.unit_sn,
                 operator             = args.operator,
@@ -429,15 +609,15 @@ def main():
                 hw_version           = args.hw_version,
                 interactive_prompts  = True,    # ALWAYS prompt — hookups required
             )
-            for r in results_p3:
-                r["phase"] = 3
-            results.extend(results_p3)
+            for r in results_p4:
+                r["phase"] = 4
+            results.extend(results_p4)
             if session_meta is None:
-                session_meta = meta_p3
+                session_meta = meta_p4
             else:
                 session_meta["sequence"] = (
-                    f"{session_meta['sequence']} + {meta_p3['sequence']}")
-            phase_labels.append(f"P3:Loopback({len(results_p3)})")
+                    f"{session_meta['sequence']} + {meta_p4['sequence']}")
+            phase_labels.append(f"P4:OperatorVerified({len(results_p4)})")
 
     # Fallback meta in case all phases were skipped (avoid crash on report)
     if session_meta is None:
@@ -449,14 +629,18 @@ def main():
             "can_interface": "—", "can_channel": "—", "can_bitrate": "—",
         }
     session_meta["phases_run"] = " + ".join(phase_labels) if phase_labels else "(none)"
+    session_meta["part_number"] = part_number
 
-    # ── Single unified report ────────────────────────────────────────────
-    out = generate_validation_report(
-        results=results,
+    # ── Unified report (per-PCB folder, append phases, version when full) ──
+    from report_store import update_report
+    out, report_version = update_report(
+        part_number, _RESULTS_DIR,
         session_meta=session_meta,
-        output_path=xlsx_path,
+        results=results,
         scope_records=scope_records,
         pm_records=pm_records,
+        hv_v_records=hv_v_records,
+        hv_i_records=hv_i_records,
     )
 
     # ── Summary (per-phase + overall) ────────────────────────────────────
@@ -466,7 +650,7 @@ def main():
                 sum(1 for r in rs if r["result"] == "FAIL"),
                 len(rs))
     n1p, n1f, n1t = _phase_counts(1)
-    n3p, n3f, n3t = _phase_counts(3)
+    n4p, n4f, n4t = _phase_counts(4)
     print("\n" + "=" * 72)
     print(f"  PCBA VERIFICATION COMPLETE — Unit {args.unit_sn}")
     if n1t:
@@ -475,12 +659,17 @@ def main():
         pp = sum(1 for r in pm_records if r["verdict"])
         print(f"  Phase 2 — Power modules   : PASS={pp}/{len(pm_records)} "
               f"({len(args.switches)} switches × freq×duty grid)")
-    if n3t:
-        print(f"  Phase 3 — Operator-verif. : PASS={n3p}  FAIL={n3f}  ({n3t} tests)")
+    if hv_v_records is not None or hv_i_records is not None:
+        vv = sum(1 for r in (hv_v_records or []) if r["verdict"])
+        ii = sum(1 for r in (hv_i_records or []) if r["verdict"])
+        print(f"  Phase 3 — HV V / I        : V PASS={vv}/{len(hv_v_records or [])}  "
+              f"I PASS={ii}/{len(hv_i_records or [])}")
+    if n4t:
+        print(f"  Phase 4 — Operator-verif. : PASS={n4p}  FAIL={n4f}  ({n4t} tests)")
     if scope_records is not None:
         sp = sum(1 for r in scope_records if r["verdict"])
         print(f"  Gate scope (legacy)       : PASS={sp}/{len(scope_records)}")
-    print(f"  Report                    : {out}")
+    print(f"  Report (V{report_version})              : {out}")
     print("=" * 72)
     return 0
 

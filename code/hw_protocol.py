@@ -408,13 +408,18 @@ class HwTestProtocol:
         base = [item for item in self.sfHwTestProtocolGetMinimumASampleTestsList()
                 if item[0] not in _b_excluded]
 
+        # NOTE: the DAC-injection voltage loopbacks HW_TEST_POWER_UNIPLR_V
+        # (0x2A) and HW_TEST_POWER_BIPLR_V (0x2B) used to live here. They are
+        # now REPLACED by the Phase-3 EA-supply HV voltage + phase-current
+        # characterization (see code/hv_iv_session.py), which drives the real
+        # sense inputs with a lab supply instead of injecting a DAC. The two
+        # tests remain in the test dictionary (callable via SET_TEST for
+        # diagnostics) but are no longer part of the bench campaign sequence.
         b_additions = [
             ## Test key                               Stim type   Stim val  Timeout
             ("HW_TEST_MCU_INTER_MEASUREMENTS",        "",         0x00,     500),    # 0x04
             ("HW_TEST_ENC_SINCOS_SIN_LOOPBACK",       "",         0x00,     1500),   # 0x25  sin front-end
             ("HW_TEST_ENC_SINCOS_COS_LOOPBACK",       "",         0x00,     1500),   # 0x26  cos front-end
-            ("HW_TEST_POWER_UNIPLR_V_LOOPBACK",       "",         0x00,     2000),   # 0x2A  DC-link voltage conditioning
-            ("HW_TEST_POWER_BIPLR_V_LOOPBACK",        "",         0x00,     2000),   # 0x2B  UV/WV phase-to-DCneg conditioning
             ("HW_TEST_PUMP_AUTO",                     "",         0x00,     5000),   # 0x2F
         ]
 
@@ -452,8 +457,9 @@ class HwTestProtocol:
         "HW_TEST_LEDS",                      # 0x01 — visual LED check
         "HW_TEST_ENC_SINCOS_SIN_LOOPBACK",   # 0x25 — DAC injection
         "HW_TEST_ENC_SINCOS_COS_LOOPBACK",   # 0x26 — DAC injection
-        "HW_TEST_POWER_UNIPLR_V_LOOPBACK",   # 0x2A — DAC injection
-        "HW_TEST_POWER_BIPLR_V_LOOPBACK",    # 0x2B — DAC injection
+        # POWER_UNIPLR_V (0x2A) / POWER_BIPLR_V (0x2B) removed — replaced by the
+        # Phase-3 EA-supply HV voltage + phase-current characterization
+        # (code/hv_iv_session.py). These keys are now the Phase-4 set.
     )
     # Backward-compat alias (the prior name was DAC-only; LEDs are now also
     # in this set — kept for any external code that imports the old name).
