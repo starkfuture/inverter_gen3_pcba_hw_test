@@ -58,7 +58,8 @@ MEAS_TYPES = {
     "fall_time": "FTIMe",
     "v_high":    "HIGH",        # high-level voltage (top)
     "v_low":     "LOW",         # low-level voltage (base)
-    "v_pp":      "PEAK",        # peak-to-peak
+    "v_pp":      "PEAK",        # peak-to-peak (max-min — includes edge overshoot)
+    "v_pp_avg":  "AMPLitude",   # amplitude = HIGH-LOW (clean swing, no overshoot)
 }
 
 
@@ -274,6 +275,7 @@ class RohdeScope:
                 "v_high":    jit(18.0,    0.02),
                 "v_low":     jit(-3.0,    0.05),
                 "v_pp":      jit(21.0,    0.02),
+                "v_pp_avg":  jit(21.0,    0.02),
             }
 
         results: Dict[str, float] = {}

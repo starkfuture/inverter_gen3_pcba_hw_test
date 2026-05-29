@@ -285,16 +285,18 @@ def write_report(results: List[Dict[str, Any]], meta: Dict[str, Any],
 
     r += 1
     cols = ["Switch", "Freq cmd", "Duty cmd", "DB (ns)", "Frequency", "Duty",
-            "Rise", "Fall", "V-high", "V-low", "V-pp", "Verdict"]
-    widths = [9, 10, 10, 8, 13, 10, 10, 10, 10, 10, 10, 10]
+            "Rise", "Fall", "V-high", "V-low", "V-pp", "V-pp avg", "Verdict"]
+    widths = [9, 10, 10, 8, 13, 10, 10, 10, 10, 10, 10, 10, 10]
     for ci, (lbl, w) in enumerate(zip(cols, widths), 1):
         c = ws.cell(row=r, column=ci, value=lbl)
         c.font = F_HDR; c.fill = _fill(NAVY); c.alignment = CENTER; c.border = BORDER
         ws.column_dimensions[get_column_letter(ci)].width = w
     hdr_row = r
 
-    keys = ["frequency", "duty", "rise_time", "fall_time", "v_high", "v_low", "v_pp"]
+    keys = ["frequency", "duty", "rise_time", "fall_time",
+            "v_high", "v_low", "v_pp", "v_pp_avg"]
     MEAS_FIRST = 5   # measurement cols start at spreadsheet column 5
+    VERDICT_COL = MEAS_FIRST + len(keys)   # column after the last measurement
     for rec in results:
         r += 1
         verdict_ok = rec["verdict"]
@@ -315,7 +317,7 @@ def write_report(results: List[Dict[str, Any]], meta: Dict[str, Any],
             cell.fill = _fill(PASS_F if ok else FAIL_F)
             cell.border = BORDER; cell.alignment = CENTER
             cell.font = F_DATA if ok else F_FAIL
-        vc = ws.cell(row=r, column=12, value=("PASS" if verdict_ok else "FAIL"))
+        vc = ws.cell(row=r, column=VERDICT_COL, value=("PASS" if verdict_ok else "FAIL"))
         vc.fill = rowfill; vc.border = BORDER; vc.alignment = CENTER
         vc.font = F_PASS_V if verdict_ok else F_FAIL
     ws.freeze_panes = ws.cell(row=hdr_row + 1, column=1)
@@ -351,7 +353,7 @@ def write_report(results: List[Dict[str, Any]], meta: Dict[str, Any],
         r += 1
         lc = ws.cell(row=r, column=1, value=label)
         lc.fill = SUM_FILL; lc.border = BORDER; lc.alignment = CENTER; lc.font = F_STAT_L
-        for ci in (2, 3, 4, 12):                      # cmd cols + verdict: blank
+        for ci in (2, 3, 4, VERDICT_COL):             # cmd cols + verdict: blank
             bc = ws.cell(row=r, column=ci, value="")
             bc.fill = SUM_FILL; bc.border = BORDER
         for i, key in enumerate(keys):

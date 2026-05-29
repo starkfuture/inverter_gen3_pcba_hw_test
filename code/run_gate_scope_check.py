@@ -79,7 +79,12 @@ PARAM_LIMITS = {
     "fall_time": (None, 500e-9, "s"),
     "v_high":    (16.0, 20.0, "V"),    # +18 V ± 2 V
     "v_low":     (-5.0, -1.0, "V"),    # -3 V ± 2 V
-    "v_pp":      (18.0, 25.0, "V"),
+    # v_pp is the scope PEAK (max-min): it captures the transient edge
+    # overshoot/ringing, so its ceiling must allow headroom above the nominal
+    # V-high(20) − V-low(-5) = 25 V swing. v_pp_avg is the AMPLitude
+    # (HIGH-LOW): the clean steady-state swing, checked to the tight 18-25 V.
+    "v_pp":      (18.0, 28.0, "V"),    # peak-to-peak incl. overshoot
+    "v_pp_avg":  (18.0, 25.0, "V"),    # amplitude (HIGH-LOW), overshoot-free
 }
 
 # ── styles ────────────────────────────────────────────────────────────────
@@ -96,8 +101,12 @@ def _fill(c): return PatternFill(start_color=c, end_color=c, fill_type="solid")
 # ── CAN helpers (skipped in --simulate) ───────────────────────────────────
 
 def _open_can():
-    from hw_can_utils import HwTestCANBus
+    from hw_can_utils import HwTestCANBus, check_can_link
     bus = HwTestCANBus().open()
+    # The PCAN USB channel opens even with nothing on the bus, so actively
+    # confirm the board is answering before any measurement (otherwise the
+    # scope just sees an undriven gate and every reading is NaN).
+    check_can_link(bus)
     return bus
 
 def _send(bus, protocol, rqst, instance, value):

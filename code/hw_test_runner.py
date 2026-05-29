@@ -65,7 +65,7 @@ import os
 from typing import List, Dict, Any, Optional
 
 from hw_protocol      import HwTestProtocol
-from hw_can_utils     import HwTestCANBus, send_frame, recv_frame
+from hw_can_utils     import HwTestCANBus, send_frame, recv_frame, check_can_link
 from hw_test_criteria import (
     check_analog, channel_name,
     set_active_hw_version, active_board_name,
@@ -723,6 +723,7 @@ def execute_campaign(sequence_name: str  = TEST_SEQUENCE,
     with HwTestCANBus() as bus:
         print(f"[CAN] Bus open.  Waiting {BOOT_WAIT_S} s for board to stabilise…")
         time.sleep(BOOT_WAIT_S)
+        check_can_link(bus, protocol)
 
         results = run_sequence(bus, protocol, sequence,
                                 verbose=verbose,
