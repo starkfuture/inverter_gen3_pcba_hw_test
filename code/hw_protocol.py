@@ -377,7 +377,7 @@ class HwTestProtocol:
             ("HW_TEST_SPI_FLASH_MEM_AUTO_TX",         "",                                0x00,     1000),
             ("HW_TEST_ENC_SPI_AUTO_TX",               "",                                0x00,     500),
             ("HW_TEST_ENC_ABI_LOOPBACK",              "",                                0x00,     2500),
-            ("HW_TEST_EXTRA_GPIOs_LOOPBACK",          "",                                0x00,     500),
+            ("HW_TEST_EXTRA_GPIOs_LOOPBACK",          "",                                0x00,     1000),
         ]
 
     def sfHwTestProtocolGetMinimumBSampleTestsList(self):
